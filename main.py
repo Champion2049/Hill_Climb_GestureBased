@@ -1,26 +1,40 @@
 import os
+# Reduce TensorFlow C++ backend log noise.
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+# Disable oneDNN path for more consistent behavior across machines.
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 # Suppress absl and other logging
 import logging
 import absl.logging
+# Remove the default absl logging hook so startup output stays clean.
 logging.root.removeHandler(absl.logging._absl_handler)
+# Avoid pre-init warning spam from absl.
 absl.logging._warn_preinit_stderr = False
 
+# OpenCV handles webcam capture and on-screen drawing.
 import cv2
+# MediaPipe provides hand landmark detection/tracking.
 import mediapipe as mp
+# time is used for startup delay and timestamp generation.
 import time
+# hashlib is used to print model SHA-256 for integrity/provenance checks.
 import hashlib
+# Path is used for robust model path handling.
 from pathlib import Path
+# urlretrieve downloads a model if it is missing locally.
 from urllib.request import urlretrieve
+# Import arrow-key scan code constants used by the game.
 from directkeys import right_pressed,left_pressed
+# Import helper functions that synthesize key down/up events on Windows.
 from directkeys import PressKey, ReleaseKey
 
 
+# Map game actions to keyboard scan codes.
 break_key_pressed=left_pressed
 accelerato_key_pressed=right_pressed
 
+# Absolute path to this script's directory.
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 # ------------------------------
@@ -60,9 +74,11 @@ LANDMARK_QUANT_LEVELS = 255  # 8-bit coordinate quantization
 time.sleep(2.0)
 
 # Runtime state used by the gesture controller loop.
+# Tracks keys currently held down by this script.
 current_key_pressed = set()
 previous_gesture = None  # Track previous gesture to avoid repeated key presses
 frame_skip = 0  # Process every nth frame for better performance
+# Last timestamp passed to VIDEO-mode inference.
 last_timestamp_ms = 0
 
 # Aliases to keep task API access concise and readable in workshop demos.
@@ -117,24 +133,32 @@ def resolve_model_path_and_url():
 
 def ensure_model_exists(model_path, model_url):
     """Ensure the requested model exists locally; download only when allowed."""
+    # Ensure the destination directory exists before file checks/download.
     model_path.parent.mkdir(parents=True, exist_ok=True)
+    # No-op when the model file is already present.
     if model_path.exists():
         return
+    # If no downloadable source exists, fail with a clear error.
     if model_url in ("", "custom"):
         raise FileNotFoundError(f"Model not found at: {model_path}")
+    # Download official model artifact.
     print(f"Downloading TFLite task model to {model_path}...")
     urlretrieve(model_url, model_path)
 
 
 def sha256_file(file_path):
     """Compute SHA-256 hash for model provenance/integrity checks."""
+    # Incremental hashing avoids loading the full model into memory.
     digest = hashlib.sha256()
+    # Read bytes from disk because hash functions operate on bytes.
     with open(file_path, "rb") as model_file:
         while True:
+            # 1 MiB chunk size balances speed and memory use.
             chunk = model_file.read(1024 * 1024)
             if not chunk:
                 break
             digest.update(chunk)
+    # Return the digest as a hex string.
     return digest.hexdigest()
 
 
@@ -184,25 +208,32 @@ def quantize_landmark_coords(landmark):
 
 def draw_hand_landmarks(image, hand_landmarks):
     """Render landmark points and hand connection lines on the display frame."""
+    # Capture frame dimensions to convert normalized landmarks -> pixel space.
     h, w, _ = image.shape
+    # Keep pixel points so we can draw skeleton edges by landmark index.
     points = []
     for lm in hand_landmarks:
+        # Convert normalized (0..1) coordinate to pixel coordinate.
         px, py = int(lm.x * w), int(lm.y * h)
         points.append((px, py))
+        # Draw each landmark as a small filled circle.
         cv2.circle(image, (px, py), 2, (0, 255, 255), cv2.FILLED)
 
+    # Draw line segments that form the hand skeleton.
     for start_idx, end_idx in HAND_CONNECTIONS:
         cv2.line(image, points[start_idx], points[end_idx], (0, 200, 0), 1)
 
+# Open the default system webcam.
 video=cv2.VideoCapture(0)
 
 if not video.isOpened():
+    # Abort early if camera is unavailable.
     raise RuntimeError("Could not open webcam. Check camera permissions/device availability.")
 
 # Optimize camera settings for better performance
 video.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 video.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-video.set(cv2.CAP_PROP_FPS, 30)
+video.set(cv2.CAP_PROP_FPS, 60)
 video.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to minimize lag
 
 MODEL_PATH, MODEL_URL = resolve_model_path_and_url()
@@ -213,21 +244,28 @@ print_model_self_check(MODEL_PATH, HAND_LANDMARKER_VARIANT, MODEL_URL)
 # - VIDEO mode enables tracking optimizations between frames.
 # - num_hands=1 keeps latency lower for this game controller scenario.
 options = HandLandmarkerOptions(
+    # Path to selected .task model bundle.
     base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
+    # VIDEO mode uses temporal tracking and requires timestamps.
     running_mode=VisionRunningMode.VIDEO,
+    # Single-hand setup for low-latency controller behavior.
     num_hands=1,
+    # Confidence thresholds for detection/presence/tracking.
     min_hand_detection_confidence=0.7,
     min_hand_presence_confidence=0.5,
     min_tracking_confidence=0.5,
 )
 
 try:
+    # Context manager handles native resource lifecycle.
     with HandLandmarker.create_from_options(options) as hand_landmarker:
         while True:
             # Skip frames for better performance
             frame_skip += 1
+            # Read one frame from webcam.
             ret, image = video.read()
             if not ret:
+                # Frame grab can fail transiently; continue loop.
                 continue
 
             if frame_skip % FRAME_PROCESS_STRIDE == 0:
@@ -244,6 +282,7 @@ try:
                 if results.hand_landmarks:
                     # We only use the first detected hand because num_hands=1.
                     hand_landmarks = results.hand_landmarks[0]
+                    # Draw landmarks on display frame for visual feedback.
                     draw_hand_landmarks(image, hand_landmarks)
 
                     # Quantize normalized landmarks into an 8-bit grid.
@@ -270,29 +309,37 @@ try:
 
                     # 5) Map finger-count to game gesture.
                     current_gesture = "NONE"
+                    # Closed fist -> brake.
                     if total == 0:
                         current_gesture = "BRAKE"
+                    # Open palm -> accelerate.
                     elif total == 5:
                         current_gesture = "GAS"
 
                     # Only update keys if gesture has changed
                     if current_gesture != previous_gesture:
                         if current_gesture == "BRAKE":
+                            # Release any key currently held before pressing brake.
                             for key in current_key_pressed:
                                 ReleaseKey(key)
                             current_key_pressed.clear()
+                            # Hold brake key while this gesture is active.
                             PressKey(break_key_pressed)
                             current_key_pressed.add(break_key_pressed)
                         elif current_gesture == "GAS":
+                            # Release any key currently held before pressing gas.
                             for key in current_key_pressed:
                                 ReleaseKey(key)
                             current_key_pressed.clear()
+                            # Hold gas key while this gesture is active.
                             PressKey(accelerato_key_pressed)
                             current_key_pressed.add(accelerato_key_pressed)
                         else:  # "NONE"
+                            # Neutral gesture: release everything.
                             for key in current_key_pressed:
                                 ReleaseKey(key)
                             current_key_pressed.clear()
+                        # Save state so unchanged gestures do not retrigger key events.
                         previous_gesture = current_gesture
 
             # Update gesture display outside the processing loop to prevent flickering
@@ -303,7 +350,9 @@ try:
                 cv2.rectangle(image, (20, 300), (270, 425), (0, 255, 0), cv2.FILLED)
                 cv2.putText(image, " GAS", (45, 375), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 0), 5)
 
+            # Show the annotated frame in an OpenCV window.
             cv2.imshow("Frame", image)
+            # Exit loop when q is pressed.
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 finally:
